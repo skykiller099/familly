@@ -127,6 +127,17 @@ const DB = {
     saveUsers(); return pet;
   },
 
+  adopterAnimalConjoint(userId, sourcePet, guildId) {
+    // Adopte une copie de l'animal du conjoint (meme type/nom, nouvel ID)
+    const u = _user(userId);
+    if (!u.pets) u.pets = [];
+    const pet = { id: randomUUID().slice(0,8), type: sourcePet.type, name: sourcePet.name, adoptedAt: new Date().toISOString(), sharedFrom: sourcePet.id };
+    u.pets.push(pet);
+    DB._checkBadges(userId);
+    if (guildId) { _guild(guildId).stats.totalPets = (_guild(guildId).stats.totalPets||0)+1; saveGuilds(); }
+    saveUsers(); return pet;
+  },
+
   abandonnerAnimal(userId, petId) {
     const u = _user(userId);
     const before = (u.pets||[]).length;

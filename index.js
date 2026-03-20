@@ -164,22 +164,42 @@ async function slash(i){
 
   if(cmd==='animal'){
     const sub=i.options.getSubcommand();
+
     if(sub==='adopter'){
       const type=i.options.getString('type'),nom=i.options.getString('nom').slice(0,32);
       if(DB.getPets(user.id).length>=10) return i.reply({embeds:[err('Limite','Vous avez deja 10 animaux !')],ephemeral:true});
       const pet=DB.adopterAnimal(user.id,type,nom,gId);
-      return i.reply({embeds:[ok('Animal adopte !',`**${nom}** le/la ${PET_EMOJI[type]||type} rejoint votre famille !\nID : \`${pet.id}\``)]});
+      const partnerId=DB.getPartenaire(user.id);
+      const partnerNote=partnerId?`\n\nVotre conjoint(e) peut aussi l'adopter : \`/animal adopter-conjoint ${pet.id}\``:'';
+      return i.reply({embeds:[ok('Animal adopte !',`**${nom}** le/la ${PET_EMOJI[type]||type} rejoint votre famille !\nID : \`${pet.id}\`${partnerNote}`)]});
     }
+
+    if(sub==='adopter-conjoint'){
+      const petId=i.options.getString('id');
+      const partnerId=DB.getPartenaire(user.id);
+      if(!partnerId) return i.reply({embeds:[err('Pas de conjoint','Vous devez etre marie(e) pour cette commande !')],ephemeral:true});
+      const partnerPets=DB.getPets(partnerId);
+      const sourcePet=partnerPets.find(p=>p.id===petId);
+      if(!sourcePet) return i.reply({embeds:[err('Introuvable',`Aucun animal avec l'ID \`${petId}\` appartenant a votre conjoint(e).\n\nUtilisez \`/animal liste @conjoint\` pour voir ses animaux.`)],ephemeral:true});
+      const myPets=DB.getPets(user.id);
+      if(myPets.some(p=>p.id===petId)) return i.reply({embeds:[err('Deja adopte','Vous avez deja adopte cet animal !')],ephemeral:true});
+      if(myPets.length>=10) return i.reply({embeds:[err('Limite','Vous avez deja 10 animaux !')],ephemeral:true});
+      const newPet=DB.adopterAnimalConjoint(user.id,sourcePet,gId);
+      const pu=await client.users.fetch(partnerId).catch(()=>null);
+      return i.reply({embeds:[ok('Animal adopte !',`**${sourcePet.name}** le/la ${PET_EMOJI[sourcePet.type]||sourcePet.type} de **${pu?.username??'votre conjoint(e)'}** fait maintenant partie de votre famille aussi !\nID : \`${newPet.id}\``)]});
+    }
+
     if(sub==='liste'){
       const cible=i.options.getUser('personne')||user;
       const pets=DB.getPets(cible.id);
       if(!pets.length) return i.reply({embeds:[inf(`Animaux de ${cible.username}`,'Aucun animal.')]});
-      const lines=pets.map(p=>`**${p.name}** (${PET_EMOJI[p.type]||p.type}) — ID: \`${p.id}\``);
+      const lines=pets.map(p=>`${PET_EMOJI[p.type]||'?'} **${p.name}** (${p.type}) — ID: \`${p.id}\``);
       return i.reply({embeds:[inf(`Animaux de ${cible.username} (${pets.length})`,lines.join('\n'),C.violet)]});
     }
+
     if(sub==='abandonner'){
       const petId=i.options.getString('id');
-      if(!DB.abandonnerAnimal(user.id,petId)) return i.reply({embeds:[err('Introuvable',`Aucun animal avec l\'ID \`${petId}\`.`)],ephemeral:true});
+      if(!DB.abandonnerAnimal(user.id,petId)) return i.reply({embeds:[err('Introuvable',`Aucun animal avec l'ID \`${petId}\`.`)],ephemeral:true});
       return i.reply({embeds:[ok('Animal abandonne','Votre animal a ete abandonne.')]});
     }
   }

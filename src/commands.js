@@ -14,6 +14,7 @@ module.exports = [
   // Animaux
   new SlashCommandBuilder().setName('animal').setDescription('Gerer vos animaux de compagnie')
     .addSubcommand(s=>s.setName('adopter').setDescription('Adopter un animal').addStringOption(o=>o.setName('type').setDescription('Type').setRequired(true).addChoices({name:'Chien',value:'chien'},{name:'Chat',value:'chat'},{name:'Poisson',value:'poisson'},{name:'Serpent',value:'serpent'},{name:'Oiseau',value:'oiseau'})).addStringOption(o=>o.setName('nom').setDescription('Prenom de lanimal').setRequired(true)))
+    .addSubcommand(s=>s.setName('adopter-conjoint').setDescription('Adopter l\'animal de votre conjoint(e) par son ID').addStringOption(o=>o.setName('id').setDescription('ID de l\'animal (visible dans /animal liste @conjoint)').setRequired(true)))
     .addSubcommand(s=>s.setName('liste').setDescription('Voir vos animaux').addUserOption(o=>o.setName('personne').setDescription('Quelqun dautre')))
     .addSubcommand(s=>s.setName('abandonner').setDescription('Abandonner un animal').addStringOption(o=>o.setName('id').setDescription('ID de lanimal (dans /animal liste)').setRequired(true))),
   // Genealogie
