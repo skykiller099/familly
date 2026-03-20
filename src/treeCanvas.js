@@ -1,400 +1,418 @@
 /**
- * treeCanvas.js — Rendu canvas arbre généalogique
- * Layout basé sur groupes couple, animaux en sous-carte
+ * treeCanvas.js v8 — Layout 100% adaptatif
+ *
+ * Principe : on calcule d'abord le scale S nécessaire pour tout faire tenir
+ * dans MAX_W×MAX_H, puis on dessine directement avec toutes les dimensions
+ * multipliées par S. Pas de ctx.scale(), pas de canvas intermédiaire.
+ * Résultat : polices et lignes toujours nets, rien ne déborde jamais.
  */
+
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const { getFamilyLayout, REL_INFO } = require('./familyGraph');
+const fs   = require('fs');
+const path = require('path');
+
+// ─── Limites de sortie ────────────────────────────────────────────────────────
+const MAX_W = 1200;
+const MAX_H = 1000;
+const MIN_S = 0.30;  // on ne descend jamais en dessous de 30% de la taille base
+
+// ─── Dimensions "base" (à S=1) ───────────────────────────────────────────────
+const B = {
+  CW: 180, CH: 70, CR: 12,   // carte W/H/radius
+  AV: 20,                     // avatar radius
+  CGAP: 6,                    // gap intra-couple
+  GGAP: 28,                   // gap inter-groupe
+  VGAP: 80,                   // gap vertical entre rangées
+  PX: 44, PY: 52,             // padding canvas
+  TH: 40,                     // hauteur zone titre
+  LH: 28,                     // hauteur zone légende (1 ligne)
+};
 
 // ─── Palette ──────────────────────────────────────────────────────────────────
-const BG0='#07050f', BG1='#0b0918', BG2='#0f0c22';
-const CARD_BG = '#120e24';
-const TEXT='#ede9fe', TEXTMUT='#3e3456';
-
-// ─── Dimensions ───────────────────────────────────────────────────────────────
-const CW=186, CH=68, CR=14;        // card width / height / corner radius
-const PET_W=76, PET_H=24, PET_CR=8; // mini pet card
-const AV=21;                        // avatar radius
-const COUPLE_GAP=6;                 // gap entre les deux cartes d'un couple
-const GROUP_GAP=32;                 // gap entre groupes distincts
-const ROW_GAP=110;                  // gap vertical entre générations
-const PAD_X=56, PAD_Y=62;
+const P = {
+  bg0:'#060411', bg1:'#0c0818', bg2:'#0f0b20',
+  card:'#0d0a1c', text:'#eae4ff', muted:'#3a3060', heart:'#f472b6',
+};
 
 // ─── Helpers couleur ──────────────────────────────────────────────────────────
-function h2r(h){return{r:parseInt(h.slice(1,3),16),g:parseInt(h.slice(3,5),16),b:parseInt(h.slice(5,7),16)};}
-function rgba(h,a){const{r,g,b}=h2r(h);return`rgba(${r},${g},${b},${a})`;}
-function lighten(h,t){const{r,g,b}=h2r(h);return`rgb(${Math.min(255,r+Math.round(t*255))},${Math.min(255,g+Math.round(t*255))},${Math.min(255,b+Math.round(t*255))})`;}
+function rgba(hex,a){
+  const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+function light(hex,t){
+  const r=parseInt(hex.slice(1,3),16),g=parseInt(hex.slice(3,5),16),b=parseInt(hex.slice(5,7),16);
+  return `rgb(${Math.min(255,r+Math.round(t*255))},${Math.min(255,g+Math.round(t*255))},${Math.min(255,b+Math.round(t*255))})`;
+}
 
 // ─── Helpers dessin ───────────────────────────────────────────────────────────
-function rr(ctx,x,y,w,h,r,fill,stroke,sw=1.5,alpha=1){
-  ctx.save(); ctx.globalAlpha=alpha;
+function rr(ctx,x,y,w,h,r){
   ctx.beginPath();
   ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y);
   ctx.arcTo(x+w,y,x+w,y+r,r); ctx.lineTo(x+w,y+h-r);
   ctx.arcTo(x+w,y+h,x+w-r,y+h,r); ctx.lineTo(x+r,y+h);
   ctx.arcTo(x,y+h,x,y+h-r,r); ctx.lineTo(x,y+r);
   ctx.arcTo(x,y,x+r,y,r); ctx.closePath();
-  if(fill){ctx.fillStyle=fill;ctx.fill();}
-  if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=sw;ctx.stroke();}
-  ctx.restore();
 }
-
-function line(ctx,x1,y1,x2,y2,col,a=0.6,w=1.8,dash=[]){
-  ctx.save();ctx.globalAlpha=a;ctx.strokeStyle=col;ctx.lineWidth=w;ctx.lineCap='round';
-  if(dash.length)ctx.setLineDash(dash);
-  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
-  ctx.setLineDash([]);ctx.restore();
+function seg(ctx,x1,y1,x2,y2,col,a,lw,dash){
+  ctx.save(); ctx.globalAlpha=a; ctx.strokeStyle=col; ctx.lineWidth=lw; ctx.lineCap='round';
+  if(dash) ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+  ctx.setLineDash([]); ctx.restore();
 }
-
-function bezier(ctx,x1,y1,x2,y2,col,a=0.65,w=2){
-  const my=(y1+y2)/2;
-  ctx.save();ctx.globalAlpha=a;ctx.strokeStyle=col;ctx.lineWidth=w;ctx.lineCap='round';
-  ctx.beginPath();ctx.moveTo(x1,y1);ctx.bezierCurveTo(x1,my,x2,my,x2,y2);ctx.stroke();ctx.restore();
-}
-
-// Coeur canvas pur
-function heart(ctx,cx,cy,s=7){
-  ctx.save();ctx.fillStyle='#f471b5';ctx.globalAlpha=.95;
+function heart(ctx,cx,cy,s){
+  ctx.save(); ctx.fillStyle=P.heart; ctx.globalAlpha=.95;
   ctx.beginPath();
   ctx.moveTo(cx,cy+s*.35);
   ctx.bezierCurveTo(cx,cy-s*.2,cx-s,cy-s*.2,cx-s,cy+s*.45);
   ctx.bezierCurveTo(cx-s,cy+s,cx,cy+s*1.5,cx,cy+s*1.5);
   ctx.bezierCurveTo(cx,cy+s*1.5,cx+s,cy+s,cx+s,cy+s*.45);
   ctx.bezierCurveTo(cx+s,cy-s*.2,cx,cy-s*.2,cx,cy+s*.35);
-  ctx.fill();ctx.restore();
+  ctx.closePath(); ctx.fill(); ctx.restore();
 }
 
-// Avatar avec halo
+// ─── Avatar ───────────────────────────────────────────────────────────────────
 async function drawAv(ctx,url,cx,cy,r,col){
-  // Halo
+  // Glow
   ctx.save();
-  const h=ctx.createRadialGradient(cx,cy,r*.5,cx,cy,r+6);
-  h.addColorStop(0,rgba(col,.28));h.addColorStop(1,rgba(col,0));
-  ctx.fillStyle=h;ctx.beginPath();ctx.arc(cx,cy,r+6,0,Math.PI*2);ctx.fill();ctx.restore();
+  const g=ctx.createRadialGradient(cx,cy,r*.4,cx,cy,r+r*.25);
+  g.addColorStop(0,rgba(col,.28)); g.addColorStop(1,rgba(col,0));
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,r+r*.25,0,Math.PI*2); ctx.fill(); ctx.restore();
   // Ring
-  ctx.save();ctx.strokeStyle=col;ctx.lineWidth=2;ctx.beginPath();ctx.arc(cx,cy,r+1,0,Math.PI*2);ctx.stroke();ctx.restore();
+  ctx.save(); ctx.strokeStyle=col; ctx.lineWidth=Math.max(1,r*.09);
+  ctx.beginPath(); ctx.arc(cx,cy,r+1,0,Math.PI*2); ctx.stroke(); ctx.restore();
+  // Image
   if(url){
     try{
       const img=await loadImage(url+'?size=64');
-      ctx.save();ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.clip();
-      ctx.drawImage(img,cx-r,cy-r,r*2,r*2);ctx.restore();return;
+      ctx.save(); ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.clip();
+      ctx.drawImage(img,cx-r,cy-r,r*2,r*2); ctx.restore(); return;
     }catch{}
   }
+  // Fallback
   ctx.save();
-  const g=ctx.createRadialGradient(cx-r*.3,cy-r*.3,0,cx,cy,r);
-  g.addColorStop(0,lighten(col,.25));g.addColorStop(1,col);
-  ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();ctx.restore();
-  ctx.save();ctx.fillStyle='#fff';ctx.font=`bold ${r}px sans-serif`;
-  ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('?',cx,cy+1);ctx.restore();
+  const fg=ctx.createRadialGradient(cx-r*.25,cy-r*.25,0,cx,cy,r);
+  fg.addColorStop(0,light(col,.28)); fg.addColorStop(1,col);
+  ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=fg; ctx.fill(); ctx.restore();
+  ctx.save(); ctx.fillStyle='#fff'; ctx.font=`bold ${Math.round(r*.82)}px sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('?',cx,cy+.5); ctx.restore();
 }
 
-// Carte principale
-async function drawCard(ctx,x,y,opts){
-  const{name,role,avURL,col,isMain,w=CW}=opts;
+// ─── Pet badges (cercles colorés dans la carte) ───────────────────────────────
+const PA={'chien':'D','chat':'C','poisson':'P','serpent':'S','oiseau':'O'};
+function petBadges(ctx,pets,x,y,cw,ch,col,s){
+  if(!pets||!pets.length) return;
+  const br=Math.max(4,Math.round(s*6.5));
+  const gap=Math.max(2,Math.round(s*3));
+  const total=pets.length*(br*2+gap)-gap;
+  let bx=x+cw-total-Math.round(s*6);
+  const by=y+ch-br-Math.round(s*5);
+  pets.forEach(pet=>{
+    ctx.save();
+    ctx.fillStyle=rgba(col,.28); ctx.strokeStyle=col; ctx.lineWidth=Math.max(.7,s*.9);
+    ctx.beginPath(); ctx.arc(bx+br,by,br,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.font=`bold ${Math.round(br*.9)}px sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(PA[pet.type]||'?',bx+br,by+.5);
+    ctx.restore();
+    bx+=br*2+gap;
+  });
+}
+
+// ─── Carte ────────────────────────────────────────────────────────────────────
+async function drawCard(ctx,x,y,cw,ch,cr,av,col,name,role,avURL,isMain,pets,s){
   // Glow shadow
-  ctx.save();ctx.shadowColor=rgba(col,isMain?.45:.2);ctx.shadowBlur=isMain?24:10;
-  rr(ctx,x,y,w,CH,CR,CARD_BG,null);ctx.restore();
+  ctx.save(); ctx.shadowColor=rgba(col,isMain?.52:.22); ctx.shadowBlur=Math.round(isMain?18:8);
+  rr(ctx,x,y,cw,ch,cr); ctx.fillStyle=P.card; ctx.fill(); ctx.restore();
   // Fond gradient
-  const gf=ctx.createLinearGradient(x,y,x+w,y+CH);
-  gf.addColorStop(0,lighten(col,.06));gf.addColorStop(1,CARD_BG);
-  rr(ctx,x,y,w,CH,CR,gf,null);
+  const gf=ctx.createLinearGradient(x,y,x+cw,y+ch);
+  gf.addColorStop(0,light(col,.08)); gf.addColorStop(1,P.card);
+  rr(ctx,x,y,cw,ch,cr); ctx.fillStyle=gf; ctx.fill();
   // Bordure
-  ctx.save();if(isMain){ctx.shadowColor=col;ctx.shadowBlur=8;}
-  rr(ctx,x,y,w,CH,CR,null,col,isMain?2.4:1.6,.88);ctx.restore();
-  // Top bar
-  ctx.save();ctx.globalAlpha=.45;
-  const bar=ctx.createLinearGradient(x+CR,y,x+w-CR,y);
-  bar.addColorStop(0,'transparent');bar.addColorStop(.3,col);bar.addColorStop(.7,col);bar.addColorStop(1,'transparent');
-  ctx.fillStyle=bar;ctx.fillRect(x+CR,y,w-CR*2,1.5);ctx.restore();
+  ctx.save(); if(isMain){ctx.shadowColor=col;ctx.shadowBlur=Math.round(s*7);}
+  rr(ctx,x,y,cw,ch,cr); ctx.strokeStyle=col; ctx.lineWidth=Math.max(.8,isMain?s*2.4:s*1.5);
+  ctx.globalAlpha=.88; ctx.stroke(); ctx.restore();
+  // Barre top
+  ctx.save(); ctx.globalAlpha=.38;
+  const bar=ctx.createLinearGradient(x+cr,y,x+cw-cr,y);
+  bar.addColorStop(0,'transparent'); bar.addColorStop(.3,col); bar.addColorStop(.7,col); bar.addColorStop(1,'transparent');
+  ctx.fillStyle=bar; ctx.fillRect(x+cr,y,cw-cr*2,Math.max(1,s*1.5)); ctx.restore();
   // Avatar
-  const avX=x+AV+11,avY=y+CH/2;
-  await drawAv(ctx,avURL||null,avX,avY,AV,col);
-  // Texte
-  const tx=x+AV*2+17,maxW=w-AV*2-22;
-  ctx.save();ctx.fillStyle=TEXT;ctx.font=(isMain?'bold ':'600 ')+'14px sans-serif';ctx.textBaseline='middle';
-  let n=name;while(n.length>1&&ctx.measureText(n).width>maxW)n=n.slice(0,-1);
-  if(n!==name)n=n.slice(0,-1)+'..';
-  ctx.fillText(n,tx,y+CH/2-(role?7.5:0));
+  await drawAv(ctx,avURL||null,x+av+Math.round(s*9),y+ch/2,av,col);
+  // Texte — tailles de police proportionnelles à ch
+  const nameFontPx = Math.max(8, Math.round(ch*.195));
+  const roleFontPx = Math.max(7, Math.round(ch*.148));
+  const tx=x+av*2+Math.round(s*13);
+  const maxTW=cw-av*2-Math.round(s*16);
+  ctx.save();
+  ctx.fillStyle=P.text; ctx.textBaseline='middle';
+  ctx.font=(isMain?'bold ':'')+`${nameFontPx}px sans-serif`;
+  let n=name; while(n.length>1&&ctx.measureText(n).width>maxTW) n=n.slice(0,-1);
+  if(n!==name) n=n.slice(0,-1)+'..';
+  ctx.fillText(n,tx,y+ch/2-(role?ch*.115:0));
   if(role){
-    ctx.fillStyle=rgba(col,.85);ctx.font='10.5px sans-serif';
-    let r2=role;while(r2.length>1&&ctx.measureText(r2).width>maxW)r2=r2.slice(0,-1);
-    if(r2!==role)r2=r2.slice(0,-1)+'..';
-    ctx.fillText(r2,tx,y+CH/2+8.5);
+    ctx.fillStyle=rgba(col,.88); ctx.font=`${roleFontPx}px sans-serif`;
+    let ro=role; while(ro.length>1&&ctx.measureText(ro).width>maxTW) ro=ro.slice(0,-1);
+    if(ro!==role) ro=ro.slice(0,-1)+'..';
+    ctx.fillText(ro,tx,y+ch/2+ch*.115);
   }
   ctx.restore();
+  // Badges animaux
+  petBadges(ctx,pets,x,y,cw,ch,col,s);
 }
 
-// Mini carte animal
-function drawPetCard(ctx,x,y,pet,col){
-  const PET_ICONS={chien:'D',chat:'C',poisson:'P',serpent:'S',oiseau:'B'};
-  rr(ctx,x,y,PET_W,PET_H,PET_CR,rgba(col,.12),col,1,.85);
-  ctx.save();ctx.fillStyle=rgba(col,.7);ctx.font='bold 9px sans-serif';ctx.textBaseline='middle';ctx.textAlign='left';
-  const ico=PET_ICONS[pet.type]||'?';
-  // Petit cercle icone
-  ctx.fillStyle=rgba(col,.9);ctx.beginPath();ctx.arc(x+10,y+PET_H/2,6,0,Math.PI*2);ctx.fill();
-  ctx.fillStyle='#fff';ctx.font='bold 8px sans-serif';ctx.textAlign='center';
-  ctx.fillText(ico,x+10,y+PET_H/2+0.5);
-  // Nom
-  ctx.fillStyle=rgba(col,.9);ctx.font='9px sans-serif';ctx.textAlign='left';
-  let nm=pet.name;while(nm.length>1&&ctx.measureText(nm).width>PET_W-24)nm=nm.slice(0,-1);
-  if(nm!==pet.name)nm=nm.slice(0,-1)+'..';
-  ctx.fillText(nm,x+19,y+PET_H/2+0.5);
-  ctx.restore();
-}
-
-// ─── CALCUL POSITIONS ─────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  CALCUL DU SCALE
+// ─────────────────────────────────────────────────────────────────────────────
 /**
- * Calcule la largeur d'un groupe (en pixels)
- * Un groupe = [id] ou [id1, id2] (couple)
+ * Retourne le scale S tel que :
+ *   - largeur totale × S ≤ MAX_W
+ *   - hauteur totale × S ≤ MAX_H
+ *   - S ≥ MIN_S
+ *
+ * S est calculé à partir de la couche la plus large et du nb de rangées.
  */
-function groupWidth(g) {
-  return g.length===1 ? CW : CW*2+COUPLE_GAP;
+function computeScale(layers) {
+  // Largeur naturelle d'un groupe
+  const gw = g => g.length===1 ? B.CW : B.CW*2+B.CGAP;
+  // Largeur naturelle d'une rangée
+  const rw = groups => groups.reduce((s,g,i)=>s+gw(g)+(i>0?B.GGAP:0), 0);
+
+  const maxRW = Math.max(...layers.map(l=>rw(l.groups)), 200);
+  const naturalW = maxRW + B.PX*2;
+  const naturalH = B.PY + B.TH + layers.length*(B.CH+B.VGAP) - B.VGAP + B.PY + B.LH;
+
+  const sx = MAX_W / naturalW;
+  const sy = MAX_H / naturalH;
+  return Math.max(MIN_S, Math.min(1, sx, sy));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  PLACEMENT
+// ─────────────────────────────────────────────────────────────────────────────
 /**
- * Calcule la largeur totale d'une couche
+ * Place les cartes en coordonnées canvas finales (déjà × S).
+ * Retourne Map<id, {x,y,cx,cy}> + les dimensions W,H du canvas.
  */
-function layerWidth(groups) {
-  return groups.reduce((s,g,i)=>s+groupWidth(g)+(i>0?GROUP_GAP:0),0);
-}
+function layout(layers, mainId, S) {
+  const cw=Math.round(B.CW*S), ch=Math.round(B.CH*S), cgap=Math.round(B.CGAP*S);
+  const ggap=Math.round(B.GGAP*S), vgap=Math.round(B.VGAP*S);
+  const px=Math.round(B.PX*S), py=Math.round(B.PY*S);
+  const th=Math.round(B.TH*S), lh=Math.round(B.LH*S);
 
-/**
- * Pour chaque groupe, calcule le "centre X du couple" (cx moyen des deux cartes)
- * Retourne { id -> {x, y, cx, cy, petY} }
- */
-function computePositions(layers, W, mainId, userMap) {
-  const pos = {}; // id -> {x,y,cx,cy}
+  const gw = g => g.length===1 ? cw : cw*2+cgap;
+  const rw = groups => groups.reduce((s,g,i)=>s+gw(g)+(i>0?ggap:0), 0);
 
-  // Trouver la couche qui contient mainId pour la centrer exactement
-  const mainLayerIdx = layers.findIndex(l => l.groups.some(g=>g.includes(mainId)));
+  const maxRW = Math.max(...layers.map(l=>rw(l.groups)), 200);
+  const W = maxRW + px*2;
+  const H = py + th + layers.length*(ch+vgap) - vgap + py + lh;
+
+  const pos = new Map();
+  const yStart = py + th;
 
   layers.forEach((layer, li) => {
-    const y = PAD_Y + li*(CH+ROW_GAP);
-    const lw = layerWidth(layer.groups);
-    let startX = (W - lw) / 2;
+    const y = yStart + li*(ch+vgap);
+    const totalW = rw(layer.groups);
 
-    // Si cette couche contient mainId, on s'assure qu'il est centré
-    // On cherche la position du groupe focal et on décale
-    const focalGrpIdx = layer.groups.findIndex(g=>g.includes(mainId));
-    if (focalGrpIdx >= 0) {
-      // Calculer le cx naturel du groupe focal
-      let cx=startX;
-      for(let gi=0;gi<focalGrpIdx;gi++) cx+=groupWidth(layer.groups[gi])+GROUP_GAP;
-      cx+=groupWidth(layer.groups[focalGrpIdx])/2;
-      // Décaler pour que ce cx soit au centre
-      startX += (W/2 - cx);
+    // Centrage de la rangée sur W
+    let startX = (W - totalW) / 2;
+
+    // Si la couche contient mainId → centrer son groupe
+    const fgi = layer.groups.findIndex(g=>g.includes(mainId));
+    if (fgi >= 0) {
+      let pre = 0;
+      for(let gi=0;gi<fgi;gi++) pre+=gw(layer.groups[gi])+ggap;
+      const focalCx = pre + gw(layer.groups[fgi])/2;
+      startX = Math.max(px, W/2 - focalCx);
     }
 
     let curX = startX;
     layer.groups.forEach(group => {
-      if (group.length===1) {
+      if(group.length===1){
         const id=group[0];
-        pos[id]={x:curX,y,cx:curX+CW/2,cy:y+CH/2};
+        pos.set(id,{x:curX,y,cx:curX+cw/2,cy:y+ch/2});
       } else {
-        // Couple : id1 à gauche, id2 à droite
         const [id1,id2]=group;
-        pos[id1]={x:curX,y,cx:curX+CW/2,cy:y+CH/2};
-        pos[id2]={x:curX+CW+COUPLE_GAP,y,cx:curX+CW+COUPLE_GAP+CW/2,cy:y+CH/2};
+        const x2=curX+cw+cgap;
+        pos.set(id1,{x:curX,y,cx:curX+cw/2,cy:y+ch/2});
+        pos.set(id2,{x:x2,  y,cx:x2+cw/2,  cy:y+ch/2});
       }
-      curX+=groupWidth(group)+GROUP_GAP;
+      curX+=gw(group)+ggap;
     });
   });
 
-  return pos;
+  return { pos, W, H, cw, ch, cr:Math.round(B.CR*S), av:Math.round(B.AV*S),
+           py, th, lh, px };
 }
 
-// ─── CONNEXIONS ───────────────────────────────────────────────────────────────
-function drawConnections(ctx, layers, pos, graph, userMap) {
-  const fs2=require('fs'),path2=require('path');
-  let users={};
-  try{users=JSON.parse(fs2.readFileSync(path2.join(__dirname,'..','data','users.json'),'utf8'));}catch{}
+// ─── Connexions ───────────────────────────────────────────────────────────────
+function drawLinks(ctx, graph, pos, S, cw, ch) {
+  const uf = path.join(__dirname,'..','data','users.json');
+  let users={}; try{users=JSON.parse(fs.readFileSync(uf,'utf8'));}catch{}
   const u=id=>users[id]||{partner:null,parents:[],children:[]};
+  const col=id=>REL_INFO[graph.get(id)?.relation||'unknown']?.couleur||'#7c3aed';
   const drawn=new Set();
+  const lw=Math.max(.7,S*1.7);
 
-  for(const layer of layers){
-    for(const group of layer.groups){
-      for(const id of group){
-        const p=pos[id]; if(!p) continue;
-        const info=graph.get(id);
-        const col=REL_INFO[info?.relation||'unknown']?.couleur||'#7c3aed';
-        const node=u(id);
+  for(const [id] of graph){
+    const p=pos.get(id); if(!p) continue;
+    const node=u(id);
 
-        // Liens parents
-        for(const pId of (node.parents||[])){
-          const pp=pos[pId]; if(!pp) continue;
-          const ek=[id,pId].sort().join(':');
-          if(drawn.has(ek)){continue;} drawn.add(ek);
+    // Parents
+    for(const pId of (node.parents||[])){
+      const pp=pos.get(pId); if(!pp) continue;
+      const ek=[id,pId].sort().join('|');
+      if(drawn.has(ek)) continue; drawn.add(ek);
 
-          const pCol=REL_INFO[graph.get(pId)?.relation||'unknown']?.couleur||'#7c3aed';
+      const pc=col(pId);
+      const co=(node.parents||[]).find(x=>x!==pId&&pos.get(x));
+      const cop=co?pos.get(co):null;
+      const ox=cop?(pp.cx+cop.cx)/2:pp.cx;
+      const fy=pp.y+ch, ty=p.y;
+      const my=fy+(ty-fy)*.38;
 
-          // Trouver les coparents (l'autre parent si couple)
-          const coParents=(node.parents||[]).filter(x=>x!==pId&&pos[x]);
+      const sibs=[...graph.keys()].filter(s=>s!==id&&u(s).parents?.includes(pId)&&pos.get(s));
 
-          // Trouver les freres/soeurs qui partagent ce parent
-          const sharedChildren=[...graph.keys()].filter(sId=>{
-            if(sId===id)return false;
-            const s=u(sId);
-            return s.parents?.includes(pId)&&pos[sId];
-          });
+      if(!sibs.length){
+        // Bezier
+        ctx.save(); ctx.globalAlpha=.58; ctx.strokeStyle=pc; ctx.lineWidth=lw; ctx.lineCap='round';
+        const bmy=(fy+ty)/2;
+        ctx.beginPath(); ctx.moveTo(ox,fy); ctx.bezierCurveTo(ox,bmy,p.cx,bmy,p.cx,ty);
+        ctx.stroke(); ctx.restore();
+      } else {
+        const kids=[id,...sibs].filter(x=>pos.get(x));
+        const xs=kids.map(x=>pos.get(x).cx);
+        seg(ctx,ox,fy,ox,my,pc,.56,lw,null);
+        seg(ctx,Math.min(...xs),my,Math.max(...xs),my,pc,.56,lw,null);
+        kids.forEach(c=>{const cp=pos.get(c);if(cp)seg(ctx,cp.cx,my,cp.cx,cp.y,col(c),.56,lw,null);});
+      }
+    }
 
-          if(sharedChildren.length===0){
-            // Ligne simple bezier
-            bezier(ctx,pp.cx,pp.y+CH,p.cx,p.y,pCol,.65,1.8);
-          } else {
-            // T-junction : tige + barre + descentes
-            const allKids=[id,...sharedChildren].filter(x=>pos[x]);
-            const allCx=allKids.map(x=>pos[x].cx);
-            const minCx=Math.min(...allCx), maxCx=Math.max(...allCx);
-
-            // Point de départ = cx du couple (si les deux parents sont là)
-            let originCx=pp.cx;
-            if(coParents.length>0&&pos[coParents[0]]){
-              originCx=(pp.cx+pos[coParents[0]].cx)/2;
-            }
-
-            const midY=pp.y+CH+(p.y-(pp.y+CH))*0.42;
-
-            // Tige
-            line(ctx,originCx,pp.y+CH,originCx,midY,pCol,.6,1.8);
-            // Barre horizontale
-            line(ctx,minCx,midY,maxCx,midY,pCol,.6,1.8);
-            // Descentes
-            allKids.forEach(cId=>{
-              const cp=pos[cId];
-              if(cp) line(ctx,cp.cx,midY,cp.cx,cp.y,REL_INFO[graph.get(cId)?.relation||'unknown']?.couleur||pCol,.6,1.8);
-            });
-          }
-        }
-
-        // Lien conjoint (horizontal avec coeur)
-        if(node.partner&&pos[node.partner]){
-          const ek2=[id,node.partner].sort().join(':♥:');
-          if(!drawn.has(ek2)){
-            drawn.add(ek2);
-            const pp2=pos[node.partner];
-            const ly=p.cy;
-            const x1=Math.min(p.x,pp2.x)+CW;
-            const x2=Math.max(p.x,pp2.x);
-            if(x2>x1+2){
-              // Ligne pointillee entre les deux cartes
-              line(ctx,x1,ly,x2,ly,'#f471b5',.8,2,[4,3]);
-              heart(ctx,(x1+x2)/2,ly-8,6);
-            }
-          }
+    // Conjoint
+    if(node.partner&&pos.get(node.partner)){
+      const ek=[id,node.partner].sort().join('|♥|');
+      if(!drawn.has(ek)){
+        drawn.add(ek);
+        const pp=pos.get(node.partner);
+        const x1=Math.min(p.x,pp.x)+cw, x2=Math.max(p.x,pp.x);
+        if(x2>x1+1){
+          seg(ctx,x1,p.cy,x2,p.cy,P.heart,.85,lw,[Math.round(S*4),Math.round(S*3)]);
+          heart(ctx,(x1+x2)/2,p.cy-Math.round(S*7),Math.round(S*6));
         }
       }
     }
   }
 }
 
-// ─── GENERATEUR PRINCIPAL ─────────────────────────────────────────────────────
-async function generateFamilyTree(treeDataUnused, userMap, mainId) {
-  const { nodes: graph, layers } = getFamilyLayout(mainId);
-
-  // ── Calcul largeur canvas ─────────────────────────────────────────────────
-  // On cherche la couche la plus large
-  const maxLW = Math.max(...layers.map(l=>layerWidth(l.groups)), 400);
-  const W = Math.max(maxLW + PAD_X*2, 720);
-
-  // ── Hauteur : on compte aussi les animaux sous chaque carte ──────────────
-  // (chaque animal = PET_H + 4 de gap)
-  const PET_MARGIN = 6;
-  function petsHeight(id){
-    const pets=(userMap[id]?.pets||[]);
-    return pets.length>0 ? pets.length*(PET_H+4)+PET_MARGIN : 0;
-  }
-
-  // Calcul H avec les animaux
-  const nLayers=layers.length;
-  const H = Math.max(PAD_Y*2 + nLayers*CH + (nLayers-1)*ROW_GAP
-    + Math.max(...[...graph.keys()].map(id=>petsHeight(id)||0)) + 60, 380);
-
-  const canvas=createCanvas(W,H);
-  const ctx=canvas.getContext('2d');
-
-  // ── Fond ──────────────────────────────────────────────────────────────────
-  const bg=ctx.createLinearGradient(0,0,W*.55,H);
-  bg.addColorStop(0,BG0);bg.addColorStop(.5,BG1);bg.addColorStop(1,BG2);
-  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
-  [[.12,.18,.42,'rgba(65,10,125,.13)'],[.88,.78,.3,'rgba(10,45,110,.1)'],[.5,.5,.6,'rgba(30,5,70,.06)']].forEach(([fx,fy,fr,fc])=>{
+// ─── Fond ─────────────────────────────────────────────────────────────────────
+function drawBg(ctx,W,H){
+  const bg=ctx.createLinearGradient(0,0,W*.5,H);
+  bg.addColorStop(0,P.bg0); bg.addColorStop(.5,P.bg1); bg.addColorStop(1,P.bg2);
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+  [[.1,.15,.48,'rgba(50,6,110,.15)'],[.9,.8,.3,'rgba(6,34,95,.12)'],[.5,.5,.4,'rgba(16,2,50,.09)']].forEach(([fx,fy,fr,fc])=>{
     const n=ctx.createRadialGradient(W*fx,H*fy,0,W*fx,H*fy,W*fr);
-    n.addColorStop(0,fc);n.addColorStop(1,'transparent');ctx.fillStyle=n;ctx.fillRect(0,0,W,H);
+    n.addColorStop(0,fc); n.addColorStop(1,'transparent');
+    ctx.fillStyle=n; ctx.fillRect(0,0,W,H);
   });
-  for(let i=0;i<120;i++){
-    ctx.save();ctx.fillStyle='#c4b5fd';ctx.globalAlpha=Math.random()*.18+.02;
-    ctx.beginPath();ctx.arc(Math.random()*W,Math.random()*H,Math.random()*1.1+.15,0,Math.PI*2);ctx.fill();ctx.restore();
+  const nStars=Math.round(80+W*.05);
+  for(let i=0;i<nStars;i++){
+    ctx.save(); ctx.globalAlpha=Math.random()*.16+.02; ctx.fillStyle='#c4b5fd';
+    ctx.beginPath(); ctx.arc(Math.random()*W,Math.random()*H,Math.random()*.85+.1,0,Math.PI*2); ctx.fill(); ctx.restore();
+  }
+}
+
+// ─── Titre ────────────────────────────────────────────────────────────────────
+function drawTitle(ctx,W,py,S,name,count){
+  const fs1=Math.max(12,Math.round(S*22)), fs2=Math.max(9,Math.round(S*11));
+  ctx.save();
+  const tg=ctx.createLinearGradient(W/2-150*S,0,W/2+150*S,0);
+  tg.addColorStop(0,'#a855f7'); tg.addColorStop(.5,'#ede9fe'); tg.addColorStop(1,'#ec4899');
+  ctx.fillStyle=tg; ctx.font=`bold ${fs1}px sans-serif`; ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.shadowColor='rgba(168,85,247,.5)'; ctx.shadowBlur=Math.round(S*10);
+  ctx.fillText(`Arbre de ${name}`,W/2,py);
+  ctx.restore();
+  ctx.save(); ctx.fillStyle=P.muted; ctx.font=`${fs2}px sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.fillText(`${count} membre${count>1?'s':''}`,W/2,py+fs1+Math.round(S*4));
+  ctx.restore();
+}
+
+// ─── Légende ──────────────────────────────────────────────────────────────────
+function drawLeg(ctx,W,H,lh,S,rels){
+  const items=[...rels].filter(r=>r!=='self').map(r=>[r,REL_INFO[r]||REL_INFO.unknown]);
+  if(!items.length) return;
+  const iW=Math.round(S*115);
+  const perRow=Math.max(1,Math.floor((W-Math.round(S*40))/iW));
+  const rows=[]; for(let i=0;i<items.length;i+=perRow) rows.push(items.slice(i,i+perRow));
+  const legY=H-lh+Math.round(S*4);
+  const rH=Math.round(S*15);
+  rows.forEach((row,ri)=>{
+    const tw=row.length*iW, lx=(W-tw)/2;
+    row.forEach(([,info],ci)=>{
+      const x=lx+ci*iW, y=legY+ri*rH;
+      const dotr=Math.max(2,Math.round(S*4));
+      ctx.save(); ctx.fillStyle=info.couleur; ctx.globalAlpha=.88;
+      ctx.beginPath(); ctx.arc(x+dotr,y,dotr,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#5a4e7a'; ctx.font=`${Math.max(8,Math.round(S*10))}px sans-serif`;
+      ctx.textBaseline='middle'; ctx.globalAlpha=.78;
+      ctx.fillText(info.label,x+dotr*2+Math.round(S*2),y);
+      ctx.restore();
+    });
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  POINT D'ENTRÉE
+// ─────────────────────────────────────────────────────────────────────────────
+async function generateFamilyTree(_unused, userMap, mainId){
+  const { nodes:graph, layers } = getFamilyLayout(mainId);
+
+  // Arbre vide
+  if(!layers.length || graph.size<=1){
+    const c=createCanvas(600,180); const ctx=c.getContext('2d');
+    drawBg(ctx,600,180);
+    ctx.fillStyle=P.text; ctx.font='bold 17px sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('Aucune famille',300,90);
+    return c.toBuffer('image/png');
   }
 
-  // ── Positions ─────────────────────────────────────────────────────────────
-  const pos=computePositions(layers, W, mainId, userMap);
+  // ── Scale ────────────────────────────────────────────────────────────────
+  const S = computeScale(layers);
+
+  // ── Layout ───────────────────────────────────────────────────────────────
+  const { pos, W, H, cw, ch, cr, av, py, th, lh } = layout(layers, mainId, S);
+
+  // ── Canvas ───────────────────────────────────────────────────────────────
+  const canvas = createCanvas(W, H);
+  const ctx    = canvas.getContext('2d');
+
+  // ── Fond ─────────────────────────────────────────────────────────────────
+  drawBg(ctx, W, H);
 
   // ── Connexions ────────────────────────────────────────────────────────────
-  drawConnections(ctx, layers, pos, graph, userMap);
+  drawLinks(ctx, graph, pos, S, cw, ch);
 
   // ── Cartes ────────────────────────────────────────────────────────────────
-  const promises=[];
+  const draws = [];
   for(const [id,info] of graph){
-    const p=pos[id]; if(!p) continue;
-    const u2=userMap[id]||{username:'Inconnu',avatarURL:null,pets:[]};
-    const rel=info.relation;
-    const ri=REL_INFO[rel]||REL_INFO.unknown;
-    const isMain=id===mainId;
-
-    promises.push(drawCard(ctx,p.x,p.y,{
-      name:u2.username,
-      role:isMain?null:ri.label,
-      avURL:u2.avatarURL,
-      col:ri.couleur,
-      isMain,
-    }));
-
-    // Animaux sous la carte
-    const pets=u2.pets||[];
-    if(pets.length>0){
-      const petStartX=p.cx-((pets.length*PET_W+(pets.length-1)*4))/2;
-      pets.forEach((pet,pi)=>{
-        const px=petStartX+pi*(PET_W+4);
-        const py=p.y+CH+PET_MARGIN+pi*0;
-        // Toutes en ligne horizontale sous la carte
-        drawPetCard(ctx,petStartX+pi*(PET_W+4),p.y+CH+PET_MARGIN,pet,ri.couleur);
-      });
-      // Petite ligne de connexion carte->animaux
-      ctx.save();ctx.globalAlpha=.3;ctx.strokeStyle=ri.couleur;ctx.lineWidth=1;ctx.setLineDash([2,3]);
-      ctx.beginPath();ctx.moveTo(p.cx,p.y+CH);ctx.lineTo(p.cx,p.y+CH+PET_MARGIN);ctx.stroke();
-      ctx.setLineDash([]);ctx.restore();
-    }
+    const p=pos.get(id); if(!p) continue;
+    const u=userMap[id]||{username:'Inconnu',avatarURL:null,pets:[]};
+    const ri=REL_INFO[info.relation]||REL_INFO.unknown;
+    draws.push(drawCard(ctx,p.x,p.y,cw,ch,cr,av,ri.couleur,
+      u.username, id===mainId?null:ri.label,
+      u.avatarURL, id===mainId, u.pets||[], S));
   }
-  await Promise.all(promises);
+  await Promise.all(draws);
 
   // ── Titre ─────────────────────────────────────────────────────────────────
   const mName=userMap[mainId]?.username??'???';
-  ctx.save();
-  const tg=ctx.createLinearGradient(W/2-200,0,W/2+200,0);
-  tg.addColorStop(0,'#a855f7');tg.addColorStop(.5,'#ede9fe');tg.addColorStop(1,'#ec4899');
-  ctx.fillStyle=tg;ctx.font='bold 22px sans-serif';ctx.textAlign='center';ctx.textBaseline='top';
-  ctx.shadowColor='#9333ea';ctx.shadowBlur=14;
-  ctx.fillText(`Arbre de ${mName}`,W/2,14);ctx.restore();
-
-  const memberCount=[...graph.keys()].filter(id=>pos[id]).length;
-  ctx.save();ctx.fillStyle=TEXTMUT;ctx.font='11px sans-serif';ctx.textAlign='center';ctx.textBaseline='top';
-  ctx.fillText(`${memberCount} membre${memberCount>1?'s':''} dans la famille`,W/2,40);ctx.restore();
+  const memberCount=[...graph.keys()].filter(id=>pos.get(id)).length;
+  drawTitle(ctx,W,py,S,mName,memberCount);
 
   // ── Légende ───────────────────────────────────────────────────────────────
-  const presentRels=new Set([...graph.values()].map(n=>n.relation));
-  presentRels.delete('self');
-  const legendItems=[...presentRels].map(k=>[k,REL_INFO[k]||REL_INFO.unknown]).filter(([,v])=>v);
-  const LW=118, perRow=Math.floor((W-PAD_X*2)/LW);
-  const lRows=[];
-  for(let i=0;i<legendItems.length;i+=perRow) lRows.push(legendItems.slice(i,i+perRow));
-  lRows.forEach((row,ri)=>{
-    const tw=row.length*LW, lx=(W-tw)/2, ly=H-18-(lRows.length-1-ri)*16;
-    row.forEach(([,info],i)=>{
-      const x=lx+i*LW;
-      ctx.save();ctx.fillStyle=info.couleur;ctx.globalAlpha=.9;
-      ctx.beginPath();ctx.arc(x+6,ly,4,0,Math.PI*2);ctx.fill();
-      ctx.fillStyle='#4a4060';ctx.font='10px sans-serif';ctx.textBaseline='middle';ctx.globalAlpha=.8;
-      ctx.fillText(info.label,x+14,ly);ctx.restore();
-    });
-  });
+  const rels=new Set([...graph.values()].map(n=>n.relation));
+  drawLeg(ctx,W,H,lh,S,rels);
 
   return canvas.toBuffer('image/png');
 }
