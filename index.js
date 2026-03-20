@@ -25,7 +25,7 @@ const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.Gui
 
 client.once('ready',async()=>{
   console.log(`\nMarriageBot France en ligne : ${client.user.tag}\n`);
-  client.user.setPresence({status:'online',activities:[{name:'/aide | MarriageBot France',type:3}]});
+  client.user.setPresence({status:'dnd',activities:[{name:'/aide | FamillyBot V13 by Sky',type:3}]});
   const rest=new REST({version:'10'}).setToken(TOKEN);
   try{await rest.put(Routes.applicationCommands(CLIENT_ID),{body:CMDS});console.log(`${CMDS.length} commandes slash enregistrees`);}
   catch(e){console.error('Erreur commandes:',e.message);}
