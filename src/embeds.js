@@ -24,7 +24,7 @@ const C = {
 function base(couleur = C.rose) {
   return new EmbedBuilder()
     .setColor(couleur)
-    .setFooter({ text: '💒 MarriageBot France', iconURL: 'https://i.imgur.com/HeIi0wU.png' })
+    .setFooter({ text: 'Familly Bot by Sky', iconURL: 'https://i.imgur.com/HeIi0wU.png' })
     .setTimestamp();
 }
 
