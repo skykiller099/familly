@@ -25,7 +25,7 @@ const client=new Client({intents:[GatewayIntentBits.Guilds,GatewayIntentBits.Gui
 
 client.once('ready',async()=>{
   console.log(`\nMarriageBot France en ligne : ${client.user.tag}\n`);
-  client.user.setPresence({status:'dnd',activities:[{name:'/aide | FamillyBot V13 by Sky',type:3}]});
+  client.user.setPresence({status:'online',activities:[{name:'/aide | MarriageBot France',type:3}]});
   const rest=new REST({version:'10'}).setToken(TOKEN);
   try{await rest.put(Routes.applicationCommands(CLIENT_ID),{body:CMDS});console.log(`${CMDS.length} commandes slash enregistrees`);}
   catch(e){console.error('Erreur commandes:',e.message);}
@@ -46,6 +46,86 @@ client.on('interactionCreate',async i=>{
 async function slash(i){
   const{commandName:cmd,user,guild}=i;
   const gId=guild.id;
+
+  // ── /lovecalc ──────────────────────────────────────────────────────────────
+  if(cmd==='lovecalc'){
+    const users_raw = [
+      i.options.getUser('personne1'),
+      i.options.getUser('personne2'),
+      i.options.getUser('personne3'),
+      i.options.getUser('personne4'),
+      i.options.getUser('personne5'),
+    ].filter(Boolean);
+
+    // Dédupliquer
+    const seen=new Set(); const users_list=users_raw.filter(u=>{if(seen.has(u.id))return false;seen.add(u.id);return true;});
+    if(users_list.length<2) return i.reply({embeds:[err('Erreur','Il faut au moins 2 personnes distinctes !')],ephemeral:true});
+
+    const ids = users_list.map(u=>u.id);
+    const {pairs, best, worst} = Love.calcMulti(ids);
+
+    // Embed principal
+    const scoreColor = Love.scoreColor(pairs.length===1?pairs[0].score:best.score);
+    const embed = new EmbedBuilder().setColor(scoreColor).setTitle('💘 Love Calculator').setTimestamp().setFooter({text:'MarriageBot France — Les scores sont definitifs !'});
+
+    if (pairs.length===1) {
+      // 2 personnes : affichage complet
+      const {id1,id2,score} = pairs[0];
+      const u1=users_list.find(u=>u.id===id1), u2=users_list.find(u=>u.id===id2);
+      const {emoji,msg} = Love.getMessage(score);
+      const bar = Love.progressBar(score);
+      embed
+        .setDescription(`**${u1.username}** ${emoji} **${u2.username}**
+
+\`${bar}\` **${score}%**
+
+*${msg}*`)
+        .setThumbnail(score>=70?u1.displayAvatarURL({dynamic:true}):null);
+    } else {
+      // Multi : tableau de toutes les paires
+      const bu1=users_list.find(u=>u.id===best.id1),bu2=users_list.find(u=>u.id===best.id2);
+      const wu1=users_list.find(u=>u.id===worst.id1),wu2=users_list.find(u=>u.id===worst.id2);
+      const lines = pairs.map(({id1,id2,score})=>{
+        const n1=users_list.find(u=>u.id===id1)?.username||'???';
+        const n2=users_list.find(u=>u.id===id2)?.username||'???';
+        const bar=Love.progressBar(score);
+        return `**${n1}** × **${n2}**\n\`${bar}\` **${score}%**`;
+      });
+      embed
+        .setDescription(lines.join('\n\n'))
+        .addFields(
+          {name:'💞 Meilleure paire',value:`**${bu1?.username||'???'}** & **${bu2?.username||'???'}** — ${best.score}%`,inline:true},
+          {name:'💔 Moins compatible',value:`**${wu1?.username||'???'}** & **${wu2?.username||'???'}** — ${worst.score}%`,inline:true},
+        );
+    }
+    return i.reply({embeds:[embed]});
+  }
+
+  // ── /love-admin ────────────────────────────────────────────────────────────
+  if(cmd==='love-admin'){
+    const sub=i.options.getSubcommand();
+    const u1=i.options.getUser('personne1'),u2=i.options.getUser('personne2');
+    if(sub==='boost'){
+      const min=i.options.getInteger('score-min');
+      const score=Love.boostPair(u1.id,u2.id,min);
+      return i.reply({embeds:[ok('Score booste !',`**${u1.username}** & **${u2.username}** ont maintenant un score de **${score}%** (minimum ${min}%)`)],ephemeral:true});
+    }
+    if(sub==='unboost'){
+      const score=Love.removeBoosted(u1.id,u2.id);
+      return i.reply({embeds:[ok('Boost retire',`**${u1.username}** & **${u2.username}** ont maintenant un score libre de **${score}%**`)],ephemeral:true});
+    }
+    if(sub==='reset'){
+      const {pairKey} = require('./src/lovecalc');
+      // Reset manuel
+      Love.reloadConfig();
+      const loveData = JSON.parse(require('fs').readFileSync('./data/love.json','utf8'));
+      const key=[u1.id,u2.id].sort().join(':');
+      delete loveData[key];
+      require('fs').writeFileSync('./data/love.json',JSON.stringify(loveData,null,2));
+      Love.reloadConfig();
+      return i.reply({embeds:[ok('Score reinitialise',`Le score de **${u1.username}** & **${u2.username}** sera recalcule a la prochaine utilisation.`)],ephemeral:true});
+    }
+  }
 
   if(cmd==='aide'){
     return i.reply({ephemeral:true,embeds:[eb(C.violet).setTitle('MarriageBot France — Aide')

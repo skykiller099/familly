@@ -41,4 +41,33 @@ module.exports = [
     .addSubcommand(s=>s.setName('reset').setDescription('Reset un profil').addUserOption(o=>o.setName('personne').setDescription('La personne').setRequired(true)))
     .addSubcommand(s=>s.setName('infos').setDescription('Donnees brutes').addUserOption(o=>o.setName('personne').setDescription('La personne').setRequired(true))),
   new SlashCommandBuilder().setName('aide').setDescription('Guide du bot'),
+
+  // Love calculator
+  new SlashCommandBuilder()
+    .setName('lovecalc')
+    .setDescription('Calculer la compatibilite amoureuse entre plusieurs personnes')
+    .addUserOption(o=>o.setName('personne1').setDescription('Premiere personne').setRequired(true))
+    .addUserOption(o=>o.setName('personne2').setDescription('Deuxieme personne').setRequired(true))
+    .addUserOption(o=>o.setName('personne3').setDescription('Troisieme personne (optionnel)'))
+    .addUserOption(o=>o.setName('personne4').setDescription('Quatrieme personne (optionnel)'))
+    .addUserOption(o=>o.setName('personne5').setDescription('Cinquieme personne (optionnel)')),
+
+  // Admin love
+  new SlashCommandBuilder()
+    .setName('love-admin')
+    .setDescription('Configurer le love calculator')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addSubcommand(s=>s.setName('boost')
+      .setDescription('Forcer un score eleve pour une paire')
+      .addUserOption(o=>o.setName('personne1').setDescription('Personne 1').setRequired(true))
+      .addUserOption(o=>o.setName('personne2').setDescription('Personne 2').setRequired(true))
+      .addIntegerOption(o=>o.setName('score-min').setDescription('Score minimum (80-99)').setRequired(true).setMinValue(80).setMaxValue(99)))
+    .addSubcommand(s=>s.setName('unboost')
+      .setDescription('Retirer le boost d une paire')
+      .addUserOption(o=>o.setName('personne1').setDescription('Personne 1').setRequired(true))
+      .addUserOption(o=>o.setName('personne2').setDescription('Personne 2').setRequired(true)))
+    .addSubcommand(s=>s.setName('reset')
+      .setDescription('Effacer le score memorise d une paire')
+      .addUserOption(o=>o.setName('personne1').setDescription('Personne 1').setRequired(true))
+      .addUserOption(o=>o.setName('personne2').setDescription('Personne 2').setRequired(true))),
 ].map(c=>c.toJSON());
